@@ -1,0 +1,384 @@
+---
+title: "p8105_hw6_mb5357"
+author: "Maria Beg"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(purrr)
+library(broom)
+library(knitr)
+```
+
+
+## Problem 1
+
+**Import the dataset**
+
+```{r, message=FALSE}
+
+homicides = 
+  read_csv("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv")
+
+```
+
+
+**Clean the dataset**
+
+```{r, warning=FALSE}
+
+# cities to exclude
+drop_cities = c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")
+
+homicides_clean = 
+  homicides |>
+  mutate(
+    city_state = str_c(city, state, sep = ", "),
+    solved = if_else(disposition == "Closed by arrest", 1, 0),
+    victim_age = as.numeric(victim_age)
+  ) |>
+  filter(!city_state %in% drop_cities,
+          victim_race %in% c("White", "Black"))
+
+```
+
+
+**Fit logistic regression for Baltimore, MD**
+
+
+```{r}
+
+baltimore =
+  homicides_clean |> 
+  filter(city_state == "Baltimore, MD")
+
+# Fit model
+fit_baltimore =
+  glm(solved ~ victim_age + victim_sex + victim_race,
+      data = baltimore,
+      family = binomial())
+
+
+baltimore_results =
+  fit_baltimore |> 
+  tidy(conf.int = TRUE, conf.level = 0.95, exponentiate = TRUE)
+
+
+baltimore_results |> 
+  filter(term == "victim_sexMale") |> 
+  select(OR = estimate, CI_low = conf.low, CI_high = conf.high)
+
+
+```
+
+Controlling for age and race, male victims in Baltimore, MD, had 57% lower odds of having their homicides solved than female victims (adjusted OR = 0.43, 95% CI: 0.32–0.56).
+
+
+**Run glm for each city, extract Odds Ratio and CI**
+
+```{r, warning=FALSE}
+
+# Nested dataset
+city_models =
+  homicides_clean |> 
+  group_by(city_state) |> 
+  nest()
+
+
+# Fit models
+city_results =
+  city_models |> 
+  mutate(
+    models = map(data, 
+                 \(df) glm(solved ~ victim_age + victim_sex + victim_race,
+                           data = df,
+                           family = binomial())),
+    results = map(models, \(m) tidy(m, conf.int = TRUE, exponentiate = TRUE))
+  ) |> 
+  select(city_state, results) |> 
+  unnest(results)
+
+
+# Extract male vs female OR 
+city_OR =
+  city_results |> 
+  filter(term == "victim_sexMale") |> 
+  select(city_state, OR = estimate, CI_low = conf.low, CI_high = conf.high)
+
+
+```
+
+
+**Plot estimated ORs and CIs**
+
+```{r, fig.width=10, fig.height=8}
+
+city_plot =
+  city_OR |> 
+  mutate(city_state = fct_reorder(city_state, OR)) |> 
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point()+
+  geom_errorbar(aes(ymin = CI_low, ymax = CI_high)) +  
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") + 
+  coord_flip() +
+  labs(
+    title = "Adjusted Odds Ratio of Solved Homicides (Male vs Female Victims)",
+    x = "",
+    y = "Odds Ratio (Male vs Female)"
+  ) +
+  theme_bw()
+
+city_plot
+
+```
+
+In most cities, the OR is below 1, indicating that, after controlling for victim age and race, homicides of male victims are generally less likely to be solved than those of female victims. Some cities show particularly low ORs; New York (0.26), Baltimore (0.43), and Chicago (0.41) suggesting a substantial disparity in resolution by victim sex.
+
+In contrast, a few cities, such as Albuquerque (1.77), Fresno (1.34), and Stockton (1.35), have ORs above 1, but the confidence intervals for these estimates are wide, reflecting greater uncertainty due to smaller sample sizes or more variability in outcomes. The red dashed line at OR = 1 provides a useful reference: cities with confidence intervals entirely below this line demonstrate a statistically significant lower odds of solving homicides for male victims, whereas cities whose intervals cross 1 show no significant difference by sex.
+
+Overall, the narrative indicates that while male victims tend to have lower odds of homicide resolution across the U.S., the magnitude and certainty of this disparity vary by city, highlighting the importance of local context in understanding homicide clearance patterns.
+
+
+
+## Problem 2
+
+
+**Load dataset**
+
+```{r, message=FALSE}
+
+library(modelr)
+library(p8105.datasets)
+data("weather_df")
+
+```
+
+
+**Bootstrap function**
+
+```{r}
+
+bootstrap_func = function(df){
+  bootstrap_sample= sample_frac(df, replace = TRUE)
+  mod= lm(tmax~tmin + prcp, data = bootstrap_sample)
+  r2 = glance(mod)$r.squared
+ 
+  coefs = tidy(mod)
+  beta1= coefs$estimate[coefs$term == "tmin"]
+  beta2= coefs$estimate[coefs$term == "prcp"]
+  tibble(
+    r2 = r2,
+    beta_ratio = beta1/beta2
+  )
+}
+
+```
+
+
+**Run 5000 bootstrap samples**
+
+```{r, cache=TRUE}
+
+set.seed(123)
+
+bootstrap_results = 
+  map_dfr(1:5000, ~bootstrap_func(weather_df))
+
+```
+
+
+**Plot distributions**
+
+R²
+
+```{r, fig.width=10, fig.height=8}
+
+bootstrap_results |>
+  ggplot(aes(x = r2)) +
+  geom_density() +
+  labs(
+    title = "Bootstrap Distribution of R²",
+    x = "R²",
+    y = "Density"
+  ) +
+  theme_bw()
+
+
+```
+
+The bootstrap distribution of R² is tight and approximately symmetric, centered around 0.94. Values fall within a narrow band (roughly 0.93–0.95), indicating that the linear model consistently explains a very large proportion of the variability in maximum temperature. This reflects a highly stable model fit across bootstrap samples.
+
+
+β1 / β2
+
+```{r, fig.width=10, fig.height=8}
+
+bootstrap_results |>
+  ggplot(aes(x = beta_ratio)) +
+  geom_density() +
+  labs(
+    title = "Bootstrap Distribution of β1 / β2",
+    x = "Coefficient Ratio",
+    y = "Density"
+  ) +
+  theme_bw()
+
+```
+
+The β₁/β₂ values are negative, reflecting that tmin has a positive effect on tmax while prcp has a negative effect. The distribution is wide and left-skewed, indicating substantial uncertainty in the ratio compared with the highly stable R².
+
+
+**Compute 95% bootstrap CIs**
+
+```{r}
+
+bootstrap_results |>
+  summarize(
+    r2_lower   = quantile(r2, 0.025),
+    r2_upper   = quantile(r2, 0.975),
+    beta_lower = quantile(beta_ratio, 0.025),
+    beta_upper = quantile(beta_ratio, 0.975)
+  )
+
+```
+
+Using 5,000 bootstrap samples, the 95% CI for R² is very tight (0.934–0.947), showing that the model’s explanatory power is highly stable. In contrast, the 95% CI for β₁/β₂ (–279 to –125) is much wider, indicating greater uncertainty about the precise value of the ratio.
+
+
+## Problem 3
+
+
+**Import and clean the dataset**
+
+```{r, message=FALSE}
+
+birthweight =
+  read_csv("birthweight.csv")
+
+birthweight_clean =
+  birthweight |> 
+  rename(
+    birth_weight = bwt,
+    sex = babysex,
+    length = blength,
+    head_circ = bhead,
+    gest_age = gaweeks
+  ) |> 
+  mutate(
+    sex = factor(sex, levels = c(1, 2), 
+                 labels = c("Male", "Female")),
+    frace = factor(frace),
+    mrace = factor(mrace),
+    malform = factor(malform)
+  ) |> 
+  drop_na(birth_weight, length, head_circ, sex, gest_age)
+
+```
+
+
+**Proposed regression model**
+
+```{r, cache=TRUE}
+
+birth_mod = lm(birth_weight ~ sex + length + head_circ + gest_age + ppbmi + wtgain + parity, 
+               data = birthweight_clean) 
+               
+```
+
+The proposed regression model includes plausible predictors for birthweight: baby’s sex, length, head circumference, gestational age, mother’s pre-pregnancy BMI, weight gain, and parity. Length and gestational age reflect fetal growth, head circumference captures overall fetal development, maternal BMI and weight gain capture maternal nutritional contributions, parity accounts for prior pregnancies, and sex reflects known differences between male and female infants.
+
+
+```{r, fig.width=10, fig.height=8}
+
+# Residuals vs fitted plot
+birthweight_clean |> 
+  add_predictions(birth_mod) |> 
+  add_residuals(birth_mod) |> 
+  ggplot(aes(x = pred, 
+             y = resid)) +
+  geom_point(alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Residuals vs Fitted Values for Birthweight Model",
+       x = "Fitted values", 
+       y = "Residuals") +
+  theme_bw()
+
+```
+
+The residuals vs. fitted values plot shows random scatter around zero, indicating the model reasonably meets linear regression assumptions. There is slight heteroscedasticity, with residual variability increasing at higher predicted birthweights, and a few outliers at the extremes. Overall, the model captures the main relationships adequately, though some variance structure remains unaccounted for.
+
+
+**Comparison models**
+
+```{r}
+
+# Length + gestational age 
+mod_simple = lm(birth_weight ~ length + gest_age, data = birthweight_clean)
+
+
+# Head circumference + length + sex + all interactions
+mod_interact = lm(birth_weight ~ (head_circ + length + sex)^3, data = birthweight_clean)
+
+```
+
+
+**Cross-validated prediction error**
+
+```{r, cache=TRUE, warning=FALSE}
+
+set.seed(123)
+
+cv_df =
+  crossv_mc(birthweight_clean, 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)
+  )
+
+cv_df =
+  cv_df |> 
+  mutate(
+    mod_proposed = map(train, \(df) 
+                       lm(birth_weight ~ sex + length + head_circ + gest_age + ppbmi + wtgain + parity, 
+                          data = df)),
+    mod_simple   = map(train, \(df) lm(birth_weight ~ length + gest_age, data = df)),
+    mod_interact = map(train, \(df) lm(birth_weight ~ (head_circ + length + sex)^3, data = df))
+  ) |> 
+  mutate(
+    rmse_proposed = map2_dbl(mod_proposed, test, \(m, df) rmse(m, df)),
+    rmse_simple   = map2_dbl(mod_simple, test, \(m, df) rmse(m, df)),
+    rmse_interact = map2_dbl(mod_interact, test, \(m, df) rmse(m, df))
+  )
+
+
+```
+
+
+**Compare prediction errors**
+
+```{r, fig.width=10, fig.height=8}
+
+cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  mutate(model = fct_inorder(model)) |> 
+    ggplot(aes(x = model, y = rmse)) +
+    geom_violin() +
+    geom_jitter(width = 0.1, alpha = 0.5) +
+  labs(
+    title = "Cross-Validated Prediction Error for Birthweight Models",
+    x = "Model",
+    y = "RMSE"
+  ) +
+  theme_bw()
+
+```
+
+The violin plot displays the distribution of cross-validated RMSE for each model. Lower and more concentrated RMSE values indicate better predictive performance. The proposed model strikes a good balance between complexity and accuracy, capturing key predictors without overfitting. The simple model (length + gestational age) consistently shows higher RMSE, indicating underfitting. The interaction model has a median RMSE similar to the proposed model but exhibits slightly more variability, suggesting it may capture important relationships while being more sensitive to specific training samples. Overall, the proposed model achieves the lowest and most stable RMSE, reflecting an optimal bias-variance tradeoff.
